@@ -35,38 +35,28 @@ internal static class Program
             PrintExportedTypes(clientAssembly, "TheIsleEvrimaRconClient");
             PrintExportedTypes(extensionAssembly, "TheIsleEvrimaRconClient.Extensions");
 
-            var clientType = SelectClientType(clientAssembly);
-            if (clientType is null)
-            {
-                Console.Error.WriteLine("Unable to locate client type with ConnectAsync/AuthorizeAsync/SendCommandAsync.");
-                return 1;
-            }
+            var clientType = RequireType(clientAssembly, "TheIsleEvrimaRconClient.EvrimaRconClient");
+            var commandType = RequireType(clientAssembly, "TheIsleEvrimaRconClient.EvrimaRconCommand");
+            var extensionsType = RequireType(extensionAssembly, "TheIsleEvrimaRconClient.Extensions.EvrimaRconClientExtensions");
 
-            Console.Error.WriteLine($"[DEBUG] Selected client type: {clientType.FullName}");
+            PrintConstructors(clientType, "EvrimaRconClient constructors");
+            PrintMethods(clientType, "EvrimaRconClient public instance methods", BindingFlags.Instance | BindingFlags.Public);
+            PrintMethods(extensionsType, "EvrimaRconClientExtensions public static methods", BindingFlags.Static | BindingFlags.Public);
+            PrintCommandMembers(commandType);
+            PrintConstructors(commandType, "EvrimaRconCommand constructors");
 
-            var client = CreateClient(clientType, ip, port);
+            var client = CreateClient(clientType, ip, port, password);
             if (client is null)
             {
-                Console.Error.WriteLine("Unable to construct client with discovered constructors.");
+                Console.Error.WriteLine("Unable to construct TheIsleEvrimaRconClient.EvrimaRconClient with discovered constructors.");
                 return 1;
             }
 
-            var connectResult = await InvokeAsyncMember(client, "ConnectAsync", null, TimeSpan.FromSeconds(10));
-            if (!IsSuccess(connectResult))
-            {
-                Console.Error.WriteLine("Connection failure.");
-                return 3;
-            }
+            await InvokeBestConnect(client, TimeSpan.FromSeconds(10));
+            await InvokeBestAuthenticate(client, password, TimeSpan.FromSeconds(10));
 
-            var authResult = await InvokeAsyncMember(client, "AuthorizeAsync", password, TimeSpan.FromSeconds(10));
-            if (!IsSuccess(authResult))
-            {
-                Console.Error.WriteLine("Auth failure.");
-                return 4;
-            }
-
-            var sendResponse = await SendCommand(client, command, TimeSpan.FromSeconds(10));
-            Console.WriteLine(ToOutput(sendResponse));
+            var response = await InvokeBestSend(client, clientType, commandType, extensionsType, command, TimeSpan.FromSeconds(10));
+            Console.WriteLine(ToOutput(response));
             return 0;
         }
         catch (TimeoutException)
@@ -74,14 +64,9 @@ internal static class Program
             Console.Error.WriteLine("Timeout.");
             return 5;
         }
-        catch (TargetInvocationException tie) when (tie.InnerException is TimeoutException)
-        {
-            Console.Error.WriteLine("Timeout.");
-            return 5;
-        }
         catch (Exception ex)
         {
-            Console.Error.WriteLine(ex.Message);
+            Console.Error.WriteLine(ex.ToString());
             return 1;
         }
     }
@@ -128,43 +113,328 @@ internal static class Program
         }
     }
 
-    private static Type? SelectClientType(Assembly clientAssembly)
+    private static Type RequireType(Assembly assembly, string fullName)
     {
-        return clientAssembly.GetExportedTypes()
-            .Where(t => t.IsClass && !t.IsAbstract)
-            .FirstOrDefault(t =>
-                HasMethod(t, "ConnectAsync") &&
-                HasMethod(t, "AuthorizeAsync") &&
-                HasMethod(t, "SendCommandAsync"));
-    }
-
-    private static bool HasMethod(Type type, string methodName)
-    {
-        return type.GetMethods(BindingFlags.Instance | BindingFlags.Public)
-            .Any(m => m.Name == methodName);
-    }
-
-    private static object? CreateClient(Type clientType, string ip, int port)
-    {
-        var constructors = clientType.GetConstructors();
-        foreach (var ctor in constructors)
+        var type = assembly.GetType(fullName, throwOnError: false, ignoreCase: false);
+        if (type is null)
         {
-            var parameters = ctor.GetParameters();
+            throw new InvalidOperationException($"Type not found: {fullName}");
+        }
+
+        Console.Error.WriteLine($"[DEBUG] Matched type: {type.FullName}");
+        return type;
+    }
+
+    private static void PrintConstructors(Type type, string label)
+    {
+        Console.Error.WriteLine($"[DEBUG] {label}:");
+        foreach (var ctor in type.GetConstructors(BindingFlags.Public | BindingFlags.Instance))
+        {
+            Console.Error.WriteLine($"[DEBUG] - {FormatConstructorSignature(ctor)}");
+        }
+    }
+
+    private static void PrintMethods(Type type, string label, BindingFlags flags)
+    {
+        Console.Error.WriteLine($"[DEBUG] {label}:");
+        foreach (var method in type.GetMethods(flags).OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine($"[DEBUG] - {FormatMethodSignature(method)}");
+        }
+    }
+
+    private static void PrintCommandMembers(Type commandType)
+    {
+        Console.Error.WriteLine("[DEBUG] EvrimaRconCommand public properties:");
+        foreach (var prop in commandType.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
+        {
+            Console.Error.WriteLine($"[DEBUG] - {GetFriendlyTypeName(prop.PropertyType)} {prop.Name}");
+        }
+
+        Console.Error.WriteLine("[DEBUG] EvrimaRconCommand public fields:");
+        foreach (var field in commandType.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
+        {
+            Console.Error.WriteLine($"[DEBUG] - {GetFriendlyTypeName(field.FieldType)} {field.Name}");
+        }
+    }
+
+    private static object? CreateClient(Type clientType, string ip, int port, string password)
+    {
+        foreach (var ctor in clientType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                     .OrderByDescending(c => c.GetParameters().Length))
+        {
+            if (!TryBuildCtorArgs(ctor.GetParameters(), ip, port, password, out var args))
+            {
+                continue;
+            }
+
             try
             {
-                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(string) && parameters[1].ParameterType == typeof(int))
+                var instance = ctor.Invoke(args);
+                Console.Error.WriteLine($"[DEBUG] Selected constructor: {FormatConstructorSignature(ctor)}");
+                return instance;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[DEBUG] Constructor failed: {FormatConstructorSignature(ctor)} | {ex.Message}");
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryBuildCtorArgs(ParameterInfo[] parameters, string ip, int port, string password, out object?[] args)
+    {
+        args = new object?[parameters.Length];
+
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var p = parameters[i];
+            var pt = p.ParameterType;
+            var name = (p.Name ?? string.Empty).ToLowerInvariant();
+
+            if (pt == typeof(string))
+            {
+                if (name.Contains("pass") || name.Contains("auth") || name.Contains("token"))
                 {
-                    return ctor.Invoke(new object[] { ip, port });
+                    args[i] = password;
+                }
+                else
+                {
+                    args[i] = ip;
+                }
+                continue;
+            }
+
+            if (pt == typeof(int))
+            {
+                args[i] = port;
+                continue;
+            }
+
+            if (pt == typeof(ushort))
+            {
+                args[i] = checked((ushort)port);
+                continue;
+            }
+
+            if (pt == typeof(bool))
+            {
+                args[i] = false;
+                continue;
+            }
+
+            if (p.HasDefaultValue)
+            {
+                args[i] = p.DefaultValue;
+                continue;
+            }
+
+            if (!pt.IsValueType)
+            {
+                args[i] = null;
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static async Task InvokeBestConnect(object client, TimeSpan timeout)
+    {
+        var methods = client.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public);
+        var connect = methods
+            .Where(m => IsConnectLike(m) && m.GetParameters().Length == 0)
+            .OrderByDescending(m => ScoreMethodName(m.Name, "connect", "reconnect", "open"))
+            .FirstOrDefault();
+
+        if (connect is null)
+        {
+            Console.Error.WriteLine("[DEBUG] No connect-like method found; continuing without explicit connect call.");
+            return;
+        }
+
+        Console.Error.WriteLine($"[DEBUG] Selected connect method: {FormatMethodSignature(connect)}");
+        await InvokeMethodAsync(client, connect, Array.Empty<object?>(), timeout);
+    }
+
+    private static async Task InvokeBestAuthenticate(object client, string password, TimeSpan timeout)
+    {
+        var methods = client.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public);
+        var auth = methods
+            .Where(m => IsAuthLike(m) && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(string))
+            .OrderByDescending(m => ScoreMethodName(m.Name, "authoriz", "auth", "login", "password"))
+            .FirstOrDefault();
+
+        if (auth is null)
+        {
+            Console.Error.WriteLine("[DEBUG] No auth-like method found; assuming constructor or connect handled auth.");
+            return;
+        }
+
+        Console.Error.WriteLine($"[DEBUG] Selected auth method: {FormatMethodSignature(auth)}");
+        await InvokeMethodAsync(client, auth, new object?[] { password }, timeout);
+    }
+
+    private static async Task<object?> InvokeBestSend(
+        object client,
+        Type clientType,
+        Type commandType,
+        Type extensionsType,
+        string command,
+        TimeSpan timeout)
+    {
+        var instanceCandidates = clientType
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(IsSendLike)
+            .OrderByDescending(m => ScoreMethodName(m.Name, "sendcommand", "send", "execute", "command"))
+            .ToList();
+
+        foreach (var method in instanceCandidates)
+        {
+            if (!TryBuildInvocationArgs(method.GetParameters(), clientType, commandType, client, command, out var args))
+            {
+                continue;
+            }
+
+            try
+            {
+                Console.Error.WriteLine($"[DEBUG] Selected send instance method: {FormatMethodSignature(method)}");
+                return await InvokeMethodAsync(client, method, args, timeout);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[DEBUG] Instance send failed: {FormatMethodSignature(method)} | {ex.Message}");
+            }
+        }
+
+        var extensionCandidates = extensionsType
+            .GetMethods(BindingFlags.Static | BindingFlags.Public)
+            .Where(m => IsSendLike(m) && m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType.IsAssignableFrom(clientType))
+            .OrderByDescending(m => ScoreMethodName(m.Name, "sendcommand", "send", "execute", "command"))
+            .ToList();
+
+        foreach (var method in extensionCandidates)
+        {
+            if (!TryBuildInvocationArgs(method.GetParameters(), clientType, commandType, client, command, out var args))
+            {
+                continue;
+            }
+
+            try
+            {
+                Console.Error.WriteLine($"[DEBUG] Selected send extension method: {FormatMethodSignature(method)}");
+                return await InvokeMethodAsync(null, method, args, timeout);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[DEBUG] Extension send failed: {FormatMethodSignature(method)} | {ex.Message}");
+            }
+        }
+
+        throw new InvalidOperationException("Unable to find a compatible send command method on client or extensions.");
+    }
+
+    private static bool TryBuildInvocationArgs(
+        ParameterInfo[] parameters,
+        Type clientType,
+        Type commandType,
+        object client,
+        string rawCommand,
+        out object?[] args)
+    {
+        args = new object?[parameters.Length];
+        var commandParts = rawCommand.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        var commandName = commandParts.Length > 0 ? commandParts[0] : string.Empty;
+        var commandArg = commandParts.Length > 1 ? commandParts[1] : string.Empty;
+
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var p = parameters[i];
+            var pt = p.ParameterType;
+
+            if (i == 0 && pt.IsAssignableFrom(clientType))
+            {
+                args[i] = client;
+                continue;
+            }
+
+            if (pt == typeof(string))
+            {
+                var name = (p.Name ?? string.Empty).ToLowerInvariant();
+                args[i] = name.Contains("arg") || name.Contains("message") || name.Contains("value") ? commandArg : rawCommand;
+                continue;
+            }
+
+            if (pt == commandType)
+            {
+                if (!TryCreateCommandObject(commandType, commandName, commandArg, rawCommand, out var cmd))
+                {
+                    return false;
                 }
 
-                if (parameters.Length == 2 && parameters[0].ParameterType == typeof(string) && parameters[1].ParameterType == typeof(ushort))
+                args[i] = cmd;
+                continue;
+            }
+
+            if (pt.IsEnum)
+            {
+                var enumValue = ParseEnum(pt, commandName);
+                if (enumValue is null)
                 {
-                    return ctor.Invoke(new object[] { ip, checked((ushort)port) });
+                    return false;
                 }
 
-                if (parameters.Length == 3 && parameters[0].ParameterType == typeof(string) && parameters[1].ParameterType == typeof(int))
+                args[i] = enumValue;
+                continue;
+            }
+
+            if (p.HasDefaultValue)
+            {
+                args[i] = p.DefaultValue;
+                continue;
+            }
+
+            if (!pt.IsValueType)
+            {
+                args[i] = null;
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryCreateCommandObject(Type commandType, string commandName, string commandArg, string rawCommand, out object? command)
+    {
+        command = null;
+
+        foreach (var ctor in commandType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                     .OrderBy(c => c.GetParameters().Length))
+        {
+            var ps = ctor.GetParameters();
+            try
+            {
+                if (ps.Length == 0)
                 {
-                    return ctor.Invoke(new object[] { ip, port, false });
+                    command = ctor.Invoke(Array.Empty<object?>());
+                    break;
+                }
+
+                if (ps.Length == 1 && ps[0].ParameterType == typeof(string))
+                {
+                    command = ctor.Invoke(new object?[] { commandName });
+                    break;
+                }
+
+                if (ps.Length == 2 && ps[0].ParameterType == typeof(string) && ps[1].ParameterType == typeof(string))
+                {
+                    command = ctor.Invoke(new object?[] { commandName, commandArg });
+                    break;
                 }
             }
             catch
@@ -173,70 +443,69 @@ internal static class Program
             }
         }
 
-        return null;
+        command ??= Activator.CreateInstance(commandType);
+        if (command is null)
+        {
+            return false;
+        }
+
+        SetIfWritable(commandType, command, "Command", commandName);
+        SetIfWritable(commandType, command, "Name", commandName);
+        SetIfWritable(commandType, command, "Action", commandName);
+        SetIfWritable(commandType, command, "Argument", commandArg);
+        SetIfWritable(commandType, command, "Value", commandArg);
+        SetIfWritable(commandType, command, "Raw", rawCommand);
+        SetIfWritable(commandType, command, "Text", rawCommand);
+
+        return true;
     }
 
-    private static async Task<object?> SendCommand(object client, string command, TimeSpan timeout)
+    private static void SetIfWritable(Type type, object instance, string propertyName, string value)
     {
-        var methods = client.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public)
-            .Where(m => m.Name == "SendCommandAsync")
-            .ToList();
-
-        Exception? lastError = null;
-        foreach (var method in methods)
+        var prop = type.GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (prop is not null && prop.CanWrite && prop.PropertyType == typeof(string))
         {
-            var args = TryBuildSendCommandArgs(method.GetParameters(), command);
-            if (args is null)
-            {
-                continue;
-            }
-
-            try
-            {
-                return await InvokeMethodAsync(client, method, args, timeout);
-            }
-            catch (Exception ex)
-            {
-                lastError = ex;
-            }
+            prop.SetValue(instance, value);
         }
 
-        throw new InvalidOperationException($"No compatible SendCommandAsync overload found. Last error: {lastError?.Message}");
+        var field = type.GetField(propertyName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (field is not null && field.FieldType == typeof(string))
+        {
+            field.SetValue(instance, value);
+        }
     }
 
-    private static object?[]? TryBuildSendCommandArgs(ParameterInfo[] parameters, string rawCommand)
+    private static bool IsConnectLike(MethodInfo m)
     {
-        if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
-        {
-            return new object?[] { rawCommand };
-        }
+        var n = m.Name.ToLowerInvariant();
+        return n.Contains("connect") || n.Contains("reconnect") || n == "open";
+    }
 
-        if (parameters.Length == 1 && parameters[0].ParameterType.IsEnum)
-        {
-            var token = rawCommand.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries)[0];
-            var enumValue = ParseEnum(parameters[0].ParameterType, token);
-            return enumValue is null ? null : new object?[] { enumValue };
-        }
+    private static bool IsAuthLike(MethodInfo m)
+    {
+        var n = m.Name.ToLowerInvariant();
+        return n.Contains("auth") || n.Contains("authoriz") || n.Contains("login") || n.Contains("password");
+    }
 
-        if (parameters.Length == 2 && parameters[0].ParameterType.IsEnum && parameters[1].ParameterType == typeof(string))
+    private static bool IsSendLike(MethodInfo m)
+    {
+        var n = m.Name.ToLowerInvariant();
+        return n.Contains("send") || n.Contains("command") || n.Contains("execute") || n.Contains("announce");
+    }
+
+    private static int ScoreMethodName(string name, params string[] preferred)
+    {
+        var lower = name.ToLowerInvariant();
+        var score = 0;
+        for (var i = 0; i < preferred.Length; i++)
         {
-            var parts = rawCommand.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 0)
+            if (lower.Contains(preferred[i]))
             {
-                return null;
+                score += 100 - i;
             }
-
-            var enumValue = ParseEnum(parameters[0].ParameterType, parts[0]);
-            if (enumValue is null)
-            {
-                return null;
-            }
-
-            var arg = parts.Length > 1 ? parts[1] : string.Empty;
-            return new object?[] { enumValue, arg };
         }
 
-        return null;
+        return score;
     }
 
     private static object? ParseEnum(Type enumType, string token)
@@ -254,30 +523,7 @@ internal static class Program
         return null;
     }
 
-    private static async Task<object?> InvokeAsyncMember(object target, string memberName, string? stringArg, TimeSpan timeout)
-    {
-        var methods = target.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public)
-            .Where(m => m.Name == memberName)
-            .ToList();
-
-        foreach (var method in methods)
-        {
-            var parameters = method.GetParameters();
-            if (parameters.Length == 0)
-            {
-                return await InvokeMethodAsync(target, method, Array.Empty<object?>(), timeout);
-            }
-
-            if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string) && stringArg is not null)
-            {
-                return await InvokeMethodAsync(target, method, new object?[] { stringArg }, timeout);
-            }
-        }
-
-        throw new InvalidOperationException($"Unable to invoke {memberName} with discovered signatures.");
-    }
-
-    private static async Task<object?> InvokeMethodAsync(object target, MethodInfo method, object?[] args, TimeSpan timeout)
+    private static async Task<object?> InvokeMethodAsync(object? target, MethodInfo method, object?[] args, TimeSpan timeout)
     {
         var result = method.Invoke(target, args);
         if (result is Task task)
@@ -290,25 +536,36 @@ internal static class Program
         return result;
     }
 
-    private static bool IsSuccess(object? result)
+    private static string FormatConstructorSignature(ConstructorInfo ctor)
     {
-        if (result is null)
+        var parameters = string.Join(", ", ctor.GetParameters().Select(FormatParameter));
+        return $"{ctor.DeclaringType?.FullName}({parameters})";
+    }
+
+    private static string FormatMethodSignature(MethodInfo method)
+    {
+        var parameters = string.Join(", ", method.GetParameters().Select(FormatParameter));
+        var returnType = GetFriendlyTypeName(method.ReturnType);
+        return $"{returnType} {method.DeclaringType?.FullName}.{method.Name}({parameters})";
+    }
+
+    private static string FormatParameter(ParameterInfo p)
+    {
+        var suffix = p.IsOptional ? " = <optional>" : string.Empty;
+        return $"{GetFriendlyTypeName(p.ParameterType)} {p.Name}{suffix}";
+    }
+
+    private static string GetFriendlyTypeName(Type type)
+    {
+        if (!type.IsGenericType)
         {
-            return true;
+            return type.FullName ?? type.Name;
         }
 
-        if (result is bool b)
-        {
-            return b;
-        }
-
-        var successProperty = result.GetType().GetProperty("Success") ?? result.GetType().GetProperty("IsSuccess");
-        if (successProperty?.PropertyType == typeof(bool))
-        {
-            return (bool)(successProperty.GetValue(result) ?? false);
-        }
-
-        return true;
+        var genericName = type.GetGenericTypeDefinition().FullName ?? type.Name;
+        genericName = genericName.Split('`')[0];
+        var args = string.Join(", ", type.GetGenericArguments().Select(GetFriendlyTypeName));
+        return $"{genericName}<{args}>";
     }
 
     private static string ToOutput(object? value)
