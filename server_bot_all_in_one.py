@@ -6,8 +6,6 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import subprocess
 import time
-import socket
-import struct
 
 TOKEN = "MTQ4NjQ2NTQ4ODczNjQ4NTQ0Ng.GvxQ-n.PIK4pMWT83jWhNp7uoZ-s5A84Xm1noIGgWxn0A"
 
@@ -322,86 +320,39 @@ def clean_message(msg):
     return msg.encode("ascii", "ignore").decode()
 
 
-def _build_rcon_packet(request_id: int, packet_type: int, body: str) -> bytes:
-    payload = struct.pack("<ii", request_id, packet_type) + body.encode("utf-8") + b"\x00\x00"
-    return struct.pack("<i", len(payload)) + payload
-
-
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            break
-        data += chunk
-    return data
-
-
-def _recv_rcon_packet(sock: socket.socket):
-    header = _recv_exact(sock, 4)
-    if len(header) < 4:
-        return None
-    (packet_size,) = struct.unpack("<i", header)
-    payload = _recv_exact(sock, packet_size)
-    if len(payload) < 8:
-        return None
-    request_id, packet_type = struct.unpack("<ii", payload[:8])
-    body = payload[8:-2].decode("utf-8", errors="ignore")
-    return request_id, packet_type, body
-
-
 def send_announcement_silent(message: str):
     cleaned = clean_message(message)
     command = f"announce {cleaned}"
-    auth_request_id = 101
-    command_request_id = 102
-    terminator_request_id = 103
-
-    print(f"[ANNOUNCEMENT DEBUG] sending: {command}")
 
     try:
-        with socket.create_connection((RCON_IP, int(RCON_PORT)), timeout=5) as sock:
-            sock.settimeout(5)
+        result = subprocess.run(
+            [
+                "RconCli.exe",
+                RCON_IP,
+                RCON_PORT,
+                RCON_PASSWORD,
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
-            sock.sendall(_build_rcon_packet(auth_request_id, 3, RCON_PASSWORD))
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
 
-            auth_ok = False
-            auth_deadline = time.time() + 5
-            while time.time() < auth_deadline:
-                packet = _recv_rcon_packet(sock)
-                if packet is None:
-                    continue
-                request_id, _, _ = packet
-                if request_id == -1:
-                    return "AUTH FAILED"
-                if request_id == auth_request_id:
-                    auth_ok = True
-                    break
+        print(f"[ANNOUNCEMENT STDOUT] {stdout}")
+        print(f"[ANNOUNCEMENT STDERR] {stderr}")
+        print(f"[ANNOUNCEMENT RETURN CODE] {result.returncode}")
 
-            if not auth_ok:
-                return "AUTH TIMEOUT"
+        if result.returncode != 0:
+            return stderr or stdout or f"RconCli failed with code {result.returncode}"
 
-            sock.sendall(_build_rcon_packet(command_request_id, 2, command))
-            sock.sendall(_build_rcon_packet(terminator_request_id, 2, ""))
-
-            response_parts = []
-            response_deadline = time.time() + 5
-            while time.time() < response_deadline:
-                packet = _recv_rcon_packet(sock)
-                if packet is None:
-                    continue
-                request_id, _, body = packet
-                if request_id == command_request_id and body:
-                    response_parts.append(body)
-                if request_id == terminator_request_id:
-                    break
-
-            response = "\n".join(part for part in response_parts if part).strip()
-            if response:
-                return response
-            return "NO RESPONSE"
-    except socket.timeout:
+        return stdout or "NO RESPONSE"
+    except subprocess.TimeoutExpired:
         return "TIMEOUT"
+    except FileNotFoundError:
+        return "ERROR: RconCli.exe not found"
     except Exception as e:
         return f"ERROR: {e}"
 
