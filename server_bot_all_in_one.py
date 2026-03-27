@@ -32,7 +32,7 @@ REFERRAL_REWARDS = {
 }
 
 announcement_messages = [
-    "=== PRIMAL ABYSS ===\n\nWelcome to a new survival universe.\n\nSERVER UNDER CONSTRUCTION\nReport bugs via Discord tickets\n\nEarn energy while you play\nUse !buy and !claim for PRIME dinos\n\nJoin the community:\nhttps://discord.gg/HpJVNa69Ww"
+    "=== PRIMAL ABYSS ===\nNew Survival Universe\nSERVER UNDER CONSTRUCTION\nReport Bugs: Discord Tickets\nEarn Energy While You Play\nUse !buy & !claim for PRIME\nDiscord: discord.gg/HpJVNa69Ww"
 ]
 
 RCON_SCRIPT = r"C:\Users\joshu\Downloads\The-Isle-Evrima-Server-Tools-main\TheIsle_RCON.py"
