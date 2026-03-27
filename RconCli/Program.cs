@@ -18,12 +18,15 @@ internal static class Program
         }
 
         var password = args[2];
-        var command = string.Join(" ", args.Skip(3)).Trim();
-        if (string.IsNullOrWhiteSpace(command))
+        var rawCommand = string.Join(" ", args.Skip(3)).Trim();
+        if (string.IsNullOrWhiteSpace(rawCommand))
         {
             Console.Error.WriteLine("Command cannot be empty.");
             return 2;
         }
+        var parsed = ParseCommand(rawCommand);
+        Console.Error.WriteLine($"[DEBUG] Parsed command verb: {parsed.Verb}");
+        Console.Error.WriteLine($"[DEBUG] Parsed command argument: {parsed.Argument}");
 
         try
         {
@@ -55,7 +58,15 @@ internal static class Program
             await InvokeBestConnect(client, TimeSpan.FromSeconds(10));
             await InvokeBestAuthenticate(client, password, TimeSpan.FromSeconds(10));
 
-            var response = await InvokeBestSend(client, clientType, commandType, extensionsType, command, TimeSpan.FromSeconds(10));
+            var response = await InvokeBestSend(
+                client,
+                clientType,
+                commandType,
+                extensionsType,
+                parsed.Verb,
+                parsed.Argument,
+                rawCommand,
+                TimeSpan.FromSeconds(10));
             Console.WriteLine(ToOutput(response));
             return 0;
         }
@@ -242,6 +253,14 @@ internal static class Program
         return true;
     }
 
+    private static (string Verb, string Argument) ParseCommand(string rawCommand)
+    {
+        var parts = rawCommand.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        var verb = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+        var argument = parts.Length > 1 ? parts[1].Trim() : string.Empty;
+        return (verb, argument);
+    }
+
     private static async Task InvokeBestConnect(object client, TimeSpan timeout)
     {
         var methods = client.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public);
@@ -283,9 +302,68 @@ internal static class Program
         Type clientType,
         Type commandType,
         Type extensionsType,
-        string command,
+        string commandVerb,
+        string commandArgument,
+        string rawCommand,
         TimeSpan timeout)
     {
+        if (string.Equals(commandVerb, "announce", StringComparison.OrdinalIgnoreCase))
+        {
+            var announceMethods = extensionsType
+                .GetMethods(BindingFlags.Static | BindingFlags.Public)
+                .Where(m =>
+                    string.Equals(m.Name, "Announce", StringComparison.OrdinalIgnoreCase) &&
+                    m.GetParameters().Length >= 2 &&
+                    m.GetParameters()[0].ParameterType.IsAssignableFrom(clientType))
+                .OrderBy(m => m.GetParameters().Length)
+                .ToList();
+
+            foreach (var method in announceMethods)
+            {
+                var ps = method.GetParameters();
+                var args = new object?[ps.Length];
+                args[0] = client;
+
+                var valid = true;
+                for (var i = 1; i < ps.Length; i++)
+                {
+                    var p = ps[i];
+                    if (p.ParameterType == typeof(string))
+                    {
+                        args[i] = commandArgument;
+                    }
+                    else if (p.HasDefaultValue)
+                    {
+                        args[i] = p.DefaultValue;
+                    }
+                    else if (!p.ParameterType.IsValueType)
+                    {
+                        args[i] = null;
+                    }
+                    else
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (!valid)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    Console.Error.WriteLine($"[DEBUG] Selected announce extension method: {FormatMethodSignature(method)}");
+                    return await InvokeMethodAsync(null, method, args, timeout);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[DEBUG] Announce extension failed: {FormatMethodSignature(method)} | {ex.Message}");
+                }
+            }
+        }
+
         var instanceCandidates = clientType
             .GetMethods(BindingFlags.Instance | BindingFlags.Public)
             .Where(IsSendLike)
@@ -294,7 +372,7 @@ internal static class Program
 
         foreach (var method in instanceCandidates)
         {
-            if (!TryBuildInvocationArgs(method.GetParameters(), clientType, commandType, client, command, out var args))
+            if (!TryBuildInvocationArgs(method.GetParameters(), clientType, commandType, client, commandVerb, commandArgument, rawCommand, out var args))
             {
                 continue;
             }
@@ -318,7 +396,7 @@ internal static class Program
 
         foreach (var method in extensionCandidates)
         {
-            if (!TryBuildInvocationArgs(method.GetParameters(), clientType, commandType, client, command, out var args))
+            if (!TryBuildInvocationArgs(method.GetParameters(), clientType, commandType, client, commandVerb, commandArgument, rawCommand, out var args))
             {
                 continue;
             }
@@ -342,13 +420,14 @@ internal static class Program
         Type clientType,
         Type commandType,
         object client,
+        string commandVerb,
+        string commandArgument,
         string rawCommand,
         out object?[] args)
     {
         args = new object?[parameters.Length];
-        var commandParts = rawCommand.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-        var commandName = commandParts.Length > 0 ? commandParts[0] : string.Empty;
-        var commandArg = commandParts.Length > 1 ? commandParts[1] : string.Empty;
+        var commandName = commandVerb;
+        var commandArg = commandArgument;
 
         for (var i = 0; i < parameters.Length; i++)
         {
@@ -364,7 +443,18 @@ internal static class Program
             if (pt == typeof(string))
             {
                 var name = (p.Name ?? string.Empty).ToLowerInvariant();
-                args[i] = name.Contains("arg") || name.Contains("message") || name.Contains("value") ? commandArg : rawCommand;
+                if (name.Contains("arg") || name.Contains("message") || name.Contains("value") || name.Contains("text"))
+                {
+                    args[i] = commandArg;
+                }
+                else if (name.Contains("verb") || name.Contains("name") || name.Contains("command"))
+                {
+                    args[i] = commandName;
+                }
+                else
+                {
+                    args[i] = string.IsNullOrWhiteSpace(commandArg) ? commandName : commandArg;
+                }
                 continue;
             }
 
