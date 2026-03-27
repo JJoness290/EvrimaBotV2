@@ -32,10 +32,7 @@ REFERRAL_REWARDS = {
 }
 
 announcement_messages = [
-    "Welcome to Primal Abyss — your new survival universe.",
-    "Server in development — report issues via Discord tickets.",
-    "Earn energy while you play — use !buy and !claim for PRIME dinos.",
-    "Join the community: https://discord.gg/HpJVNa69Ww"
+    "=== PRIMAL ABYSS ===\n\nWelcome to a new survival universe.\n\nSERVER UNDER CONSTRUCTION\nReport bugs via Discord tickets\n\nEarn energy while you play\nUse !buy and !claim for PRIME dinos\n\nJoin the community:\nhttps://discord.gg/HpJVNa69Ww"
 ]
 
 RCON_SCRIPT = r"C:\Users\joshu\Downloads\The-Isle-Evrima-Server-Tools-main\TheIsle_RCON.py"
@@ -53,9 +50,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 invite_cache = {}
 online_since = {}
 last_minute_tick = {}
-
-announcement_index = 0
-
 
 def load_json(path: Path, default):
     if path.exists():
@@ -595,14 +589,11 @@ async def tracking_loop():
 
 @tasks.loop(seconds=ANNOUNCEMENT_INTERVAL_SECONDS)
 async def announcement_loop():
-    global announcement_index
-
     try:
-        message = announcement_messages[announcement_index % len(announcement_messages)]
+        message = announcement_messages[0]
         success = await asyncio.to_thread(send_announcement_silent, message)
         if success:
             print("[ANNOUNCEMENT SUCCESS]")
-            announcement_index = (announcement_index + 1) % len(announcement_messages)
         else:
             print("[ANNOUNCEMENT FAILED]")
     except Exception as e:
