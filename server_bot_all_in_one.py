@@ -40,9 +40,11 @@ announcement_messages = [
 ]
 
 RCON_SCRIPT = r"C:\Users\joshu\Downloads\The-Isle-Evrima-Server-Tools-main\TheIsle_RCON.py"
+RCONCLI_PATH = r"C:\Users\joshu\Documents\EvrimaBot\RconCli\bin\Release\net8.0\RconCli.exe"
 RCON_IP = "68.168.208.54"
 RCON_PORT = "11218"
 RCON_PASSWORD = "qFHrZpel6qwF"
+ANNOUNCEMENT_INTERVAL_SECONDS = 600
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -53,7 +55,6 @@ invite_cache = {}
 online_since = {}
 last_minute_tick = {}
 
-last_announcement_time = 0
 announcement_index = 0
 
 
@@ -323,11 +324,12 @@ def clean_message(msg):
 def send_announcement_silent(message: str):
     cleaned = clean_message(message)
     command = f"announce {cleaned}"
+    print(f"[ANNOUNCEMENT DEBUG] sending: {command}")
 
     try:
         result = subprocess.run(
             [
-                "RconCli.exe",
+                RCONCLI_PATH,
                 RCON_IP,
                 RCON_PORT,
                 RCON_PASSWORD,
@@ -335,7 +337,6 @@ def send_announcement_silent(message: str):
             ],
             capture_output=True,
             text=True,
-            timeout=10,
         )
 
         stdout = (result.stdout or "").strip()
@@ -345,16 +346,15 @@ def send_announcement_silent(message: str):
         print(f"[ANNOUNCEMENT STDERR] {stderr}")
         print(f"[ANNOUNCEMENT RETURN CODE] {result.returncode}")
 
-        if result.returncode != 0:
-            return stderr or stdout or f"RconCli failed with code {result.returncode}"
-
-        return stdout or "NO RESPONSE"
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT"
+        return result.returncode == 0 and "Announced:" in stdout
     except FileNotFoundError:
-        return "ERROR: RconCli.exe not found"
+        print("[ANNOUNCEMENT STDERR] ERROR: RconCli.exe not found")
+        print("[ANNOUNCEMENT RETURN CODE] -1")
+        return False
     except Exception as e:
-        return f"ERROR: {e}"
+        print(f"[ANNOUNCEMENT STDERR] ERROR: {e}")
+        print("[ANNOUNCEMENT RETURN CODE] -1")
+        return False
 
 
 def get_players_from_rcon():
@@ -595,31 +595,24 @@ async def tracking_loop():
         print(f"[ERROR] tracking loop failed: {e}")
 
 
-@tasks.loop(seconds=5)
+@tasks.loop(seconds=ANNOUNCEMENT_INTERVAL_SECONDS)
 async def announcement_loop():
-    global last_announcement_time
     global announcement_index
 
     try:
-        current_time = time.time()
-        if current_time - last_announcement_time >= 15:
-            message = announcement_messages[announcement_index % len(announcement_messages)]
-            response = await asyncio.to_thread(send_announcement_silent, message)
-            print(f"[ANNOUNCEMENT RESPONSE] {response}")
-            if "Announced" in response or "announced" in response:
-                print("[ANNOUNCEMENT SUCCESS]")
-            else:
-                print("[ANNOUNCEMENT FAILED]")
-            last_announcement_time = current_time
+        message = announcement_messages[announcement_index % len(announcement_messages)]
+        success = await asyncio.to_thread(send_announcement_silent, message)
+        if success:
+            print("[ANNOUNCEMENT SUCCESS]")
             announcement_index = (announcement_index + 1) % len(announcement_messages)
+        else:
+            print("[ANNOUNCEMENT FAILED]")
     except Exception as e:
         print(f"[ERROR] announcement loop failed: {e}")
 
 
 @bot.event
 async def on_ready():
-    global last_announcement_time
-
     print(f"[BOT STARTED] Logged in as {bot.user}")
     restore_state()
 
@@ -632,15 +625,14 @@ async def on_ready():
         announcement_loop.start()
     print("[ANNOUNCEMENTS STARTED]")
 
-    if last_announcement_time == 0:
-        last_announcement_time = time.time() - 15
-
-    await asyncio.sleep(5)
-    startup_response = await asyncio.to_thread(send_announcement_silent, "TEST MESSAGE FROM BOT")
-    print(f"[ANNOUNCEMENT RESPONSE] {startup_response}")
-
     for guild in bot.guilds:
         await cache_guild_invites(guild)
+
+
+@announcement_loop.before_loop
+async def before_announcement_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(ANNOUNCEMENT_INTERVAL_SECONDS)
 
 
 @bot.event
