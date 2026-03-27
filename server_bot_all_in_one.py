@@ -32,11 +32,10 @@ REFERRAL_REWARDS = {
 }
 
 announcement_messages = [
-    "Welcome to Primal Abyss",
-    "Earn energy while you survive",
-    "Join our Discord for rewards",
-    "Use !buy and !claim to get PRIME dinos",
-    "Invite friends for bonus rewards"
+    "Welcome to Primal Abyss — your new survival universe.",
+    "Server in development — report issues via Discord tickets.",
+    "Earn energy while you play — use !buy and !claim for PRIME dinos.",
+    "Join the community: https://discord.gg/HpJVNa69Ww"
 ]
 
 RCON_SCRIPT = r"C:\Users\joshu\Downloads\The-Isle-Evrima-Server-Tools-main\TheIsle_RCON.py"
