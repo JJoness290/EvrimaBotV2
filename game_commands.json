@@ -1,0 +1,32 @@
+[
+  {
+    "id": "cmd_001",
+    "steam_id": "76561199170469822",
+    "player_name": "SleepyBear",
+    "item": "hypsi",
+    "command": "/elder 76561199170469822 prime",
+    "status": "DONE",
+    "created_at": "2026-03-26 03:30:01.351638",
+    "completed_at": "2026-03-26 03:30:08"
+  },
+  {
+    "id": "cmd_002",
+    "steam_id": "76561198091988153",
+    "player_name": "Kaos Maximo",
+    "item": "hypsi",
+    "command": "/elder 76561198091988153 prime",
+    "status": "DONE",
+    "created_at": "2026-03-26 03:30:16.326197",
+    "completed_at": "2026-03-26 03:30:23"
+  },
+  {
+    "id": "cmd_003",
+    "steam_id": "76561199230260982",
+    "player_name": "Vegeta",
+    "item": "hypsi",
+    "command": "/elder 76561199230260982 prime",
+    "status": "DONE",
+    "created_at": "2026-03-26 04:17:13.231225",
+    "completed_at": "2026-03-26 04:17:20"
+  }
+]
