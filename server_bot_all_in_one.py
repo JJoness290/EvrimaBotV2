@@ -324,7 +324,6 @@ def clean_message(msg):
 def send_announcement_silent(message: str):
     cleaned = clean_message(message)
     command = f"announce {cleaned}"
-    print(f"[ANNOUNCEMENT DEBUG] sending: {command}")
 
     try:
         result = subprocess.run(
@@ -341,12 +340,12 @@ def send_announcement_silent(message: str):
 
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
-
-        print(f"[ANNOUNCEMENT STDOUT] {stdout}")
-        print(f"[ANNOUNCEMENT STDERR] {stderr}")
-        print(f"[ANNOUNCEMENT RETURN CODE] {result.returncode}")
-
-        return result.returncode == 0 and "Announced:" in stdout
+        success = result.returncode == 0 and "Announced:" in stdout
+        if not success:
+            print(f"[ANNOUNCEMENT STDOUT] {stdout}")
+            print(f"[ANNOUNCEMENT STDERR] {stderr}")
+            print(f"[ANNOUNCEMENT RETURN CODE] {result.returncode}")
+        return success
     except FileNotFoundError:
         print("[ANNOUNCEMENT STDERR] ERROR: RconCli.exe not found")
         print("[ANNOUNCEMENT RETURN CODE] -1")
