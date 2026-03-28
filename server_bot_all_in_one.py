@@ -512,16 +512,31 @@ def process_game_command_queue():
             cmd["completed_at"] = str(datetime.now())
             print(f"[CLAIM QUEUED] {steam_id} | {item} | {command_text}")
 
-            for purchase in purchases:
-                if (
-                    purchase.get("steam_id") == steam_id
-                    and str(purchase.get("item", "")).lower().strip() == item
-                    and purchase.get("status") == "QUEUED_FOR_PRIME"
-                    and str(command_text).startswith("/hunger ")
-                ):
-                    purchase["status"] = "DELIVERED"
-                    purchase["delivery_note"] = command_text
-                    changed_purchases = True
+            final_command_text = f"/hunger {steam_id} 100"
+            if str(command_text).strip() == final_command_text:
+                completed_statuses = {"SENT", "DONE"}
+                sent_for_purchase = [
+                    c for c in game_commands
+                    if c.get("steam_id") == steam_id
+                    and str(c.get("item", "")).lower().strip() == item
+                    and c.get("status") in completed_statuses
+                ]
+                sent_texts = [str(c.get("command", "")).strip() for c in sent_for_purchase]
+
+                elder_count = sum(1 for t in sent_texts if t == f"/elder {steam_id} prime")
+                hunger_30_seen = any(t == f"/hunger {steam_id} 30" for t in sent_texts)
+                hunger_100_count = sum(1 for t in sent_texts if t == final_command_text)
+
+                if elder_count >= 2 and hunger_30_seen and hunger_100_count >= 2:
+                    for purchase in purchases:
+                        if (
+                            purchase.get("steam_id") == steam_id
+                            and str(purchase.get("item", "")).lower().strip() == item
+                            and purchase.get("status") == "QUEUED_FOR_PRIME"
+                        ):
+                            purchase["status"] = "DELIVERED"
+                            purchase["delivery_note"] = command_text
+                            changed_purchases = True
 
         except Exception as e:
             cmd["status"] = "FAILED"
@@ -847,14 +862,19 @@ async def claim(ctx):
 
     game_commands = load_game_commands()
 
-    prime_command_text = f"/elder {steam_id} prime"
-    hunger_command_text = f"/hunger {steam_id} 100"
+    claim_sequence_commands = [
+        f"/elder {steam_id} prime",
+        f"/hunger {steam_id} 100",
+        f"/hunger {steam_id} 30",
+        f"/elder {steam_id} prime",
+        f"/hunger {steam_id} 100",
+    ]
 
     existing_pending = any(
         cmd.get("steam_id") == steam_id
         and str(cmd.get("item", "")).lower().strip() == str(purchases[purchase_index]["item"]).lower().strip()
-        and str(cmd.get("command", "")) in {prime_command_text, hunger_command_text}
-        and cmd.get("status") in {"PENDING", "SENDING"}
+        and str(cmd.get("command", "")) in set(claim_sequence_commands)
+        and cmd.get("status") in {"PENDING", "SENDING", "EXECUTING"}
         for cmd in game_commands
     )
     if existing_pending:
@@ -867,45 +887,35 @@ async def claim(ctx):
         return
 
     next_id = get_next_command_id(game_commands)
-    command_text = prime_command_text
-
-    game_commands.append({
-        "id": f"cmd_{next_id:03d}",
-        "steam_id": steam_id,
-        "player_name": player["name"],
-        "item": purchases[purchase_index]["item"],
-        "command": command_text,
-        "status": "PENDING",
-        "created_at": str(datetime.now()),
-        "completed_at": None
-    })
-
-    second_id = next_id + 1
-    game_commands.append({
-        "id": f"cmd_{second_id:03d}",
-        "steam_id": steam_id,
-        "player_name": player["name"],
-        "item": purchases[purchase_index]["item"],
-        "command": hunger_command_text,
-        "status": "PENDING",
-        "created_at": str(datetime.now()),
-        "completed_at": None
-    })
+    for idx, command_text in enumerate(claim_sequence_commands):
+        game_commands.append({
+            "id": f"cmd_{next_id + idx:03d}",
+            "steam_id": steam_id,
+            "player_name": player["name"],
+            "item": purchases[purchase_index]["item"],
+            "command": command_text,
+            "status": "PENDING",
+            "created_at": str(datetime.now()),
+            "completed_at": None
+        })
     save_game_commands(game_commands)
 
     purchases[purchase_index]["status"] = "QUEUED_FOR_PRIME"
     purchases[purchase_index]["claimed_at"] = str(datetime.now())
-    purchases[purchase_index]["delivery_note"] = command_text
+    purchases[purchase_index]["delivery_note"] = " | ".join(claim_sequence_commands)
     save_purchases(purchases)
 
-    print(f"[CLAIM QUEUED] {player['name']} | {steam_id} | {command_text}")
+    print(f"[CLAIM QUEUED] {player['name']} | {steam_id} | {' ; '.join(claim_sequence_commands)}")
+
+    queued_commands_display = "\n".join(
+        f"{i + 1}. `{command}`" for i, command in enumerate(claim_sequence_commands)
+    )
 
     await ctx.send(
         f"⚡ **PRIME QUEUED**\n\n"
         f"🧬 Dino: **{purchases[purchase_index]['item'].upper()}**\n"
         f"👤 Player: **{player['name']}**\n"
-        f"📨 Command queued: `{command_text}`\n"
-        f"🍖 Hunger set to 100 queued: `{hunger_command_text}`\n\n"
+        f"📨 Commands queued:\n{queued_commands_display}\n\n"
         f"Stay in game while the admin bridge sends it."
     )
 

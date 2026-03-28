@@ -37,14 +37,21 @@ def main():
                 command_text = cmd.get("command")
 
                 print(f"Executing: {command_text}")
+                cmd["status"] = "EXECUTING"
+                save_commands(commands)
 
-                type_command(command_text)
+                try:
+                    type_command(command_text)
+                    cmd["status"] = "DONE"
+                    cmd["completed_at"] = str(time.time())
+                except Exception as e:
+                    cmd["status"] = "FAILED"
+                    cmd["completed_at"] = str(time.time())
+                    cmd["error"] = str(e)
 
-                cmd["status"] = "DONE"
-                cmd["completed_at"] = str(time.time())
                 changed = True
-
-                time.sleep(2)  # delay between commands
+                save_commands(commands)
+                time.sleep(3)  # delay between commands
 
         if changed:
             save_commands(commands)
