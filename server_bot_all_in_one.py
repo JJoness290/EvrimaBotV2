@@ -239,7 +239,7 @@ def expire_old_purchases():
                     if (
                         cmd.get("steam_id") == steam_id
                         and str(cmd.get("item", "")).lower().strip() == item
-                        and cmd.get("status") in {"PENDING", "SENDING"}
+                        and cmd.get("status") in {"PENDING", "SENDING", "EXECUTING"}
                     ):
                         cmd["status"] = "EXPIRED"
                         cmd["completed_at"] = str(datetime.now())
@@ -492,60 +492,29 @@ def process_game_command_queue():
     game_commands = load_game_commands()
     purchases = load_purchases()
 
-    changed_commands = False
     changed_purchases = False
 
-    for cmd in game_commands:
-        if cmd.get("status") != "PENDING":
+    for purchase in purchases:
+        if purchase.get("status") != "QUEUED_FOR_PRIME":
             continue
 
-        steam_id = cmd.get("steam_id")
-        item = str(cmd.get("item", "")).lower().strip()
-        command_text = cmd.get("command", "")
+        steam_id = purchase.get("steam_id")
+        item = str(purchase.get("item", "")).lower().strip()
 
-        cmd["status"] = "SENDING"
-        changed_commands = True
+        matching_final = [
+            cmd for cmd in game_commands
+            if cmd.get("steam_id") == steam_id
+            and str(cmd.get("item", "")).lower().strip() == item
+            and bool(cmd.get("claim_final")) is True
+            and cmd.get("status") == "DONE"
+        ]
 
-        try:
-            run_rcon(command_text)
-            cmd["status"] = "SENT"
-            cmd["completed_at"] = str(datetime.now())
-            print(f"[CLAIM QUEUED] {steam_id} | {item} | {command_text}")
+        if matching_final:
+            latest_final = matching_final[-1]
+            purchase["status"] = "DELIVERED"
+            purchase["delivery_note"] = f"{latest_final.get('command', '')} | group={latest_final.get('claim_group_id', 'legacy')}"
+            changed_purchases = True
 
-            final_command_text = f"/hunger {steam_id} 100"
-            if str(command_text).strip() == final_command_text:
-                completed_statuses = {"SENT", "DONE"}
-                sent_for_purchase = [
-                    c for c in game_commands
-                    if c.get("steam_id") == steam_id
-                    and str(c.get("item", "")).lower().strip() == item
-                    and c.get("status") in completed_statuses
-                ]
-                sent_texts = [str(c.get("command", "")).strip() for c in sent_for_purchase]
-
-                elder_count = sum(1 for t in sent_texts if t == f"/elder {steam_id} prime")
-                hunger_30_seen = any(t == f"/hunger {steam_id} 30" for t in sent_texts)
-                hunger_100_count = sum(1 for t in sent_texts if t == final_command_text)
-
-                if elder_count >= 2 and hunger_30_seen and hunger_100_count >= 2:
-                    for purchase in purchases:
-                        if (
-                            purchase.get("steam_id") == steam_id
-                            and str(purchase.get("item", "")).lower().strip() == item
-                            and purchase.get("status") == "QUEUED_FOR_PRIME"
-                        ):
-                            purchase["status"] = "DELIVERED"
-                            purchase["delivery_note"] = command_text
-                            changed_purchases = True
-
-        except Exception as e:
-            cmd["status"] = "FAILED"
-            cmd["completed_at"] = str(datetime.now())
-            cmd["error"] = str(e)
-            print(f"[ERROR] claim queue send failed: {e}")
-
-    if changed_commands:
-        save_game_commands(game_commands)
     if changed_purchases:
         save_purchases(purchases)
 
@@ -869,12 +838,16 @@ async def claim(ctx):
         f"/elder {steam_id} prime",
         f"/hunger {steam_id} 100",
     ]
+    active_statuses = {"PENDING", "SENDING", "EXECUTING"}
 
     existing_pending = any(
         cmd.get("steam_id") == steam_id
         and str(cmd.get("item", "")).lower().strip() == str(purchases[purchase_index]["item"]).lower().strip()
-        and str(cmd.get("command", "")) in set(claim_sequence_commands)
-        and cmd.get("status") in {"PENDING", "SENDING", "EXECUTING"}
+        and cmd.get("status") in active_statuses
+        and (
+            str(cmd.get("command", "")) in set(claim_sequence_commands)
+            or cmd.get("claim_group_id")
+        )
         for cmd in game_commands
     )
     if existing_pending:
@@ -887,6 +860,7 @@ async def claim(ctx):
         return
 
     next_id = get_next_command_id(game_commands)
+    claim_group_id = f"claim_{steam_id}_{int(time.time())}_{next_id}"
     for idx, command_text in enumerate(claim_sequence_commands):
         game_commands.append({
             "id": f"cmd_{next_id + idx:03d}",
@@ -895,6 +869,9 @@ async def claim(ctx):
             "item": purchases[purchase_index]["item"],
             "command": command_text,
             "status": "PENDING",
+            "claim_group_id": claim_group_id,
+            "claim_step": idx + 1,
+            "claim_final": (idx + 1) == len(claim_sequence_commands),
             "created_at": str(datetime.now()),
             "completed_at": None
         })
@@ -902,10 +879,14 @@ async def claim(ctx):
 
     purchases[purchase_index]["status"] = "QUEUED_FOR_PRIME"
     purchases[purchase_index]["claimed_at"] = str(datetime.now())
-    purchases[purchase_index]["delivery_note"] = " | ".join(claim_sequence_commands)
+    purchases[purchase_index]["delivery_note"] = (
+        f"group={claim_group_id} | " + " -> ".join(
+            f"{i + 1}:{cmd}" for i, cmd in enumerate(claim_sequence_commands)
+        )
+    )
     save_purchases(purchases)
 
-    print(f"[CLAIM QUEUED] {player['name']} | {steam_id} | {' ; '.join(claim_sequence_commands)}")
+    print(f"[CLAIM QUEUED] {player['name']} | {steam_id} | group={claim_group_id} | {' ; '.join(claim_sequence_commands)}")
 
     queued_commands_display = "\n".join(
         f"{i + 1}. `{command}`" for i, command in enumerate(claim_sequence_commands)
@@ -915,6 +896,7 @@ async def claim(ctx):
         f"⚡ **PRIME QUEUED**\n\n"
         f"🧬 Dino: **{purchases[purchase_index]['item'].upper()}**\n"
         f"👤 Player: **{player['name']}**\n"
+        f"🧷 Claim Group: `{claim_group_id}`\n"
         f"📨 Commands queued:\n{queued_commands_display}\n\n"
         f"Stay in game while the admin bridge sends it."
     )
