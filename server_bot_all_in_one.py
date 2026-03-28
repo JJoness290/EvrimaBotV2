@@ -6,8 +6,6 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import subprocess
 import time
-import socket
-import struct
 
 TOKEN = "MTQ4NjQ2NTQ4ODczNjQ4NTQ0Ng.GvxQ-n.PIK4pMWT83jWhNp7uoZ-s5A84Xm1noIGgWxn0A"
 
@@ -34,17 +32,15 @@ REFERRAL_REWARDS = {
 }
 
 announcement_messages = [
-    "Welcome to Primal Abyss",
-    "Earn energy while you survive",
-    "Join our Discord for rewards",
-    "Use !buy and !claim to get PRIME dinos",
-    "Invite friends for bonus rewards"
+    "=== PRIMAL ABYSS ===\nNew Survival Universe\nEarn Energy • !buy & !claim PRIME\ndiscord.gg/HpJVNa69Ww"
 ]
 
 RCON_SCRIPT = r"C:\Users\joshu\Downloads\The-Isle-Evrima-Server-Tools-main\TheIsle_RCON.py"
+RCONCLI_PATH = r"C:\Users\joshu\Documents\EvrimaBot\RconCli\bin\Release\net8.0\RconCli.exe"
 RCON_IP = "68.168.208.54"
 RCON_PORT = "11218"
 RCON_PASSWORD = "qFHrZpel6qwF"
+ANNOUNCEMENT_INTERVAL_SECONDS = 600
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -54,10 +50,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 invite_cache = {}
 online_since = {}
 last_minute_tick = {}
-
-last_announcement_time = 0
-announcement_index = 0
-
 
 def load_json(path: Path, default):
     if path.exists():
@@ -247,7 +239,7 @@ def expire_old_purchases():
                     if (
                         cmd.get("steam_id") == steam_id
                         and str(cmd.get("item", "")).lower().strip() == item
-                        and cmd.get("status") in {"PENDING", "SENDING"}
+                        and cmd.get("status") in {"PENDING", "SENDING", "EXECUTING"}
                     ):
                         cmd["status"] = "EXPIRED"
                         cmd["completed_at"] = str(datetime.now())
@@ -322,88 +314,39 @@ def clean_message(msg):
     return msg.encode("ascii", "ignore").decode()
 
 
-def _build_rcon_packet(request_id: int, packet_type: int, body: str) -> bytes:
-    payload = struct.pack("<ii", request_id, packet_type) + body.encode("utf-8") + b"\x00\x00"
-    return struct.pack("<i", len(payload)) + payload
-
-
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            break
-        data += chunk
-    return data
-
-
-def _recv_rcon_packet(sock: socket.socket):
-    header = _recv_exact(sock, 4)
-    if len(header) < 4:
-        return None
-    (packet_size,) = struct.unpack("<i", header)
-    payload = _recv_exact(sock, packet_size)
-    if len(payload) < 8:
-        return None
-    request_id, packet_type = struct.unpack("<ii", payload[:8])
-    body = payload[8:-2].decode("utf-8", errors="ignore")
-    return request_id, packet_type, body
-
-
 def send_announcement_silent(message: str):
     cleaned = clean_message(message)
     command = f"announce {cleaned}"
-    auth_request_id = 101
-    command_request_id = 102
-    terminator_request_id = 103
-
-    print(f"[ANNOUNCEMENT DEBUG] sending: {command}")
 
     try:
-        with socket.create_connection((RCON_IP, int(RCON_PORT)), timeout=5) as sock:
-            sock.settimeout(5)
+        result = subprocess.run(
+            [
+                RCONCLI_PATH,
+                RCON_IP,
+                RCON_PORT,
+                RCON_PASSWORD,
+                command,
+            ],
+            capture_output=True,
+            text=True,
+        )
 
-            sock.sendall(_build_rcon_packet(auth_request_id, 3, RCON_PASSWORD))
-
-            auth_ok = False
-            auth_deadline = time.time() + 5
-            while time.time() < auth_deadline:
-                packet = _recv_rcon_packet(sock)
-                if packet is None:
-                    continue
-                request_id, _, _ = packet
-                if request_id == -1:
-                    return "AUTH FAILED"
-                if request_id == auth_request_id:
-                    auth_ok = True
-                    break
-
-            if not auth_ok:
-                return "AUTH TIMEOUT"
-
-            sock.sendall(_build_rcon_packet(command_request_id, 2, command))
-            sock.sendall(_build_rcon_packet(terminator_request_id, 2, ""))
-
-            response_parts = []
-            response_deadline = time.time() + 5
-            while time.time() < response_deadline:
-                packet = _recv_rcon_packet(sock)
-                if packet is None:
-                    continue
-                request_id, _, body = packet
-                if request_id == command_request_id and body:
-                    response_parts.append(body)
-                if request_id == terminator_request_id:
-                    break
-
-            response = "\n".join(part for part in response_parts if part).strip()
-            if response:
-                return response
-            return "NO RESPONSE"
-    except socket.timeout:
-        return "TIMEOUT"
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        success = result.returncode == 0 and "Announced:" in stdout
+        if not success:
+            print(f"[ANNOUNCEMENT STDOUT] {stdout}")
+            print(f"[ANNOUNCEMENT STDERR] {stderr}")
+            print(f"[ANNOUNCEMENT RETURN CODE] {result.returncode}")
+        return success
+    except FileNotFoundError:
+        print("[ANNOUNCEMENT STDERR] ERROR: RconCli.exe not found")
+        print("[ANNOUNCEMENT RETURN CODE] -1")
+        return False
     except Exception as e:
-        return f"ERROR: {e}"
+        print(f"[ANNOUNCEMENT STDERR] ERROR: {e}")
+        print("[ANNOUNCEMENT RETURN CODE] -1")
+        return False
 
 
 def get_players_from_rcon():
@@ -549,45 +492,29 @@ def process_game_command_queue():
     game_commands = load_game_commands()
     purchases = load_purchases()
 
-    changed_commands = False
     changed_purchases = False
 
-    for cmd in game_commands:
-        if cmd.get("status") != "PENDING":
+    for purchase in purchases:
+        if purchase.get("status") != "QUEUED_FOR_PRIME":
             continue
 
-        steam_id = cmd.get("steam_id")
-        item = str(cmd.get("item", "")).lower().strip()
-        command_text = cmd.get("command", "")
+        steam_id = purchase.get("steam_id")
+        item = str(purchase.get("item", "")).lower().strip()
 
-        cmd["status"] = "SENDING"
-        changed_commands = True
+        matching_final = [
+            cmd for cmd in game_commands
+            if cmd.get("steam_id") == steam_id
+            and str(cmd.get("item", "")).lower().strip() == item
+            and bool(cmd.get("claim_final")) is True
+            and cmd.get("status") == "DONE"
+        ]
 
-        try:
-            run_rcon(command_text)
-            cmd["status"] = "SENT"
-            cmd["completed_at"] = str(datetime.now())
-            print(f"[CLAIM QUEUED] {steam_id} | {item} | {command_text}")
+        if matching_final:
+            latest_final = matching_final[-1]
+            purchase["status"] = "DELIVERED"
+            purchase["delivery_note"] = f"{latest_final.get('command', '')} | group={latest_final.get('claim_group_id', 'legacy')}"
+            changed_purchases = True
 
-            for purchase in purchases:
-                if (
-                    purchase.get("steam_id") == steam_id
-                    and str(purchase.get("item", "")).lower().strip() == item
-                    and purchase.get("status") == "QUEUED_FOR_PRIME"
-                    and str(command_text).startswith("/hunger ")
-                ):
-                    purchase["status"] = "DELIVERED"
-                    purchase["delivery_note"] = command_text
-                    changed_purchases = True
-
-        except Exception as e:
-            cmd["status"] = "FAILED"
-            cmd["completed_at"] = str(datetime.now())
-            cmd["error"] = str(e)
-            print(f"[ERROR] claim queue send failed: {e}")
-
-    if changed_commands:
-        save_game_commands(game_commands)
     if changed_purchases:
         save_purchases(purchases)
 
@@ -644,31 +571,21 @@ async def tracking_loop():
         print(f"[ERROR] tracking loop failed: {e}")
 
 
-@tasks.loop(seconds=5)
+@tasks.loop(seconds=ANNOUNCEMENT_INTERVAL_SECONDS)
 async def announcement_loop():
-    global last_announcement_time
-    global announcement_index
-
     try:
-        current_time = time.time()
-        if current_time - last_announcement_time >= 15:
-            message = announcement_messages[announcement_index % len(announcement_messages)]
-            response = await asyncio.to_thread(send_announcement_silent, message)
-            print(f"[ANNOUNCEMENT RESPONSE] {response}")
-            if "Announced" in response or "announced" in response:
-                print("[ANNOUNCEMENT SUCCESS]")
-            else:
-                print("[ANNOUNCEMENT FAILED]")
-            last_announcement_time = current_time
-            announcement_index = (announcement_index + 1) % len(announcement_messages)
+        message = announcement_messages[0]
+        success = await asyncio.to_thread(send_announcement_silent, message)
+        if success:
+            print("[ANNOUNCEMENT SUCCESS]")
+        else:
+            print("[ANNOUNCEMENT FAILED]")
     except Exception as e:
         print(f"[ERROR] announcement loop failed: {e}")
 
 
 @bot.event
 async def on_ready():
-    global last_announcement_time
-
     print(f"[BOT STARTED] Logged in as {bot.user}")
     restore_state()
 
@@ -681,15 +598,14 @@ async def on_ready():
         announcement_loop.start()
     print("[ANNOUNCEMENTS STARTED]")
 
-    if last_announcement_time == 0:
-        last_announcement_time = time.time() - 15
-
-    await asyncio.sleep(5)
-    startup_response = await asyncio.to_thread(send_announcement_silent, "TEST MESSAGE FROM BOT")
-    print(f"[ANNOUNCEMENT RESPONSE] {startup_response}")
-
     for guild in bot.guilds:
         await cache_guild_invites(guild)
+
+
+@announcement_loop.before_loop
+async def before_announcement_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(ANNOUNCEMENT_INTERVAL_SECONDS)
 
 
 @bot.event
@@ -915,14 +831,23 @@ async def claim(ctx):
 
     game_commands = load_game_commands()
 
-    prime_command_text = f"/elder {steam_id} prime"
-    hunger_command_text = f"/hunger {steam_id} 100"
+    claim_sequence_commands = [
+        f"/elder {steam_id} prime",
+        f"/hunger {steam_id} 100",
+        f"/hunger {steam_id} 30",
+        f"/elder {steam_id} prime",
+        f"/hunger {steam_id} 100",
+    ]
+    active_statuses = {"PENDING", "SENDING", "EXECUTING"}
 
     existing_pending = any(
         cmd.get("steam_id") == steam_id
         and str(cmd.get("item", "")).lower().strip() == str(purchases[purchase_index]["item"]).lower().strip()
-        and str(cmd.get("command", "")) in {prime_command_text, hunger_command_text}
-        and cmd.get("status") in {"PENDING", "SENDING"}
+        and cmd.get("status") in active_statuses
+        and (
+            str(cmd.get("command", "")) in set(claim_sequence_commands)
+            or cmd.get("claim_group_id")
+        )
         for cmd in game_commands
     )
     if existing_pending:
@@ -935,45 +860,44 @@ async def claim(ctx):
         return
 
     next_id = get_next_command_id(game_commands)
-    command_text = prime_command_text
-
-    game_commands.append({
-        "id": f"cmd_{next_id:03d}",
-        "steam_id": steam_id,
-        "player_name": player["name"],
-        "item": purchases[purchase_index]["item"],
-        "command": command_text,
-        "status": "PENDING",
-        "created_at": str(datetime.now()),
-        "completed_at": None
-    })
-
-    second_id = next_id + 1
-    game_commands.append({
-        "id": f"cmd_{second_id:03d}",
-        "steam_id": steam_id,
-        "player_name": player["name"],
-        "item": purchases[purchase_index]["item"],
-        "command": hunger_command_text,
-        "status": "PENDING",
-        "created_at": str(datetime.now()),
-        "completed_at": None
-    })
+    claim_group_id = f"claim_{steam_id}_{int(time.time())}_{next_id}"
+    for idx, command_text in enumerate(claim_sequence_commands):
+        game_commands.append({
+            "id": f"cmd_{next_id + idx:03d}",
+            "steam_id": steam_id,
+            "player_name": player["name"],
+            "item": purchases[purchase_index]["item"],
+            "command": command_text,
+            "status": "PENDING",
+            "claim_group_id": claim_group_id,
+            "claim_step": idx + 1,
+            "claim_final": (idx + 1) == len(claim_sequence_commands),
+            "created_at": str(datetime.now()),
+            "completed_at": None
+        })
     save_game_commands(game_commands)
 
     purchases[purchase_index]["status"] = "QUEUED_FOR_PRIME"
     purchases[purchase_index]["claimed_at"] = str(datetime.now())
-    purchases[purchase_index]["delivery_note"] = command_text
+    purchases[purchase_index]["delivery_note"] = (
+        f"group={claim_group_id} | " + " -> ".join(
+            f"{i + 1}:{cmd}" for i, cmd in enumerate(claim_sequence_commands)
+        )
+    )
     save_purchases(purchases)
 
-    print(f"[CLAIM QUEUED] {player['name']} | {steam_id} | {command_text}")
+    print(f"[CLAIM QUEUED] {player['name']} | {steam_id} | group={claim_group_id} | {' ; '.join(claim_sequence_commands)}")
+
+    queued_commands_display = "\n".join(
+        f"{i + 1}. `{command}`" for i, command in enumerate(claim_sequence_commands)
+    )
 
     await ctx.send(
         f"⚡ **PRIME QUEUED**\n\n"
         f"🧬 Dino: **{purchases[purchase_index]['item'].upper()}**\n"
         f"👤 Player: **{player['name']}**\n"
-        f"📨 Command queued: `{command_text}`\n"
-        f"🍖 Hunger set to 100 queued: `{hunger_command_text}`\n\n"
+        f"🧷 Claim Group: `{claim_group_id}`\n"
+        f"📨 Commands queued:\n{queued_commands_display}\n\n"
         f"Stay in game while the admin bridge sends it."
     )
 
